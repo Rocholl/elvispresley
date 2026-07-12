@@ -2,6 +2,7 @@
 """Descarga grabaciones de un perfil de Smule (canal completo)."""
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -18,6 +19,21 @@ OUT = Path(__file__).resolve().parent / "canciones"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 API_LIMIT = 25
 LOAD_TIMEOUT_S = 90
+log = logging.getLogger("descargar")
+
+
+def setup_logging(out: Path) -> None:
+    out.mkdir(exist_ok=True)
+    if log.handlers:
+        return
+    log.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    for handler in (
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(out / "descarga.log", encoding="utf-8"),
+    ):
+        handler.setFormatter(fmt)
+        log.addHandler(handler)
 
 
 def curl_json(url: str) -> dict:
@@ -40,7 +56,7 @@ def fetch_channel_songs(page, account_id: int, username: str) -> list[dict]:
     if catalog.exists():
         songs = json.loads(catalog.read_text())
         if songs:
-            print(f"Catálogo en caché: {len(songs)} canciones", flush=True)
+            log.info("Catálogo en caché: %d canciones", len(songs))
             return songs
 
     page.goto(f"https://www.smule.com/{username}", wait_until="domcontentloaded", timeout=60000)
@@ -62,7 +78,7 @@ def fetch_channel_songs(page, account_id: int, username: str) -> list[dict]:
         songs.extend(batch)
         offset += len(batch)
         if offset % 500 < API_LIMIT:
-            print(f"  listando... {len(songs)}", flush=True)
+            log.info("  listando... %d", len(songs))
         if len(batch) < API_LIMIT:
             break
         time.sleep(0.12)
@@ -163,6 +179,7 @@ def download_media(url: str, dest: Path) -> None:
 def main() -> int:
     username = sys.argv[1] if len(sys.argv) > 1 else USER
     OUT.mkdir(exist_ok=True)
+    setup_logging(OUT)
     manifest = OUT / "manifest.json"
     failures = OUT / "fallidas.json"
     progress = OUT / "progreso.txt"
@@ -183,9 +200,9 @@ def main() -> int:
         browser = p.chromium.launch(**launch)
         page = browser.new_page(user_agent=UA)
 
-        print(f"Obteniendo catálogo de {username}...", flush=True)
+        log.info("Obteniendo catálogo de %s...", username)
         songs = fetch_channel_songs(page, ACCOUNT_ID, username)
-        print(f"Total: {len(songs)} canciones", flush=True)
+        log.info("Total: %d canciones (%d ya descargadas)", len(songs), len(done))
 
         for i, song in enumerate(songs, 1):
             key = song["performance_key"]
@@ -196,10 +213,10 @@ def main() -> int:
 
             if key in done and Path(done[key]["file"]).exists():
                 if i % 100 == 0:
-                    print(f"[{i}/{len(songs)}] {len(done)} descargadas", flush=True)
+                    log.info("[%d/%d] %d descargadas (saltando ya hechas)", i, len(songs), len(done))
                 continue
 
-            print(f"[{i}/{len(songs)}] {artist} - {title}", flush=True)
+            log.info("[%d/%d] %s - %s", i, len(songs), artist, title)
             progress.write_text(f"{i}/{len(songs)} - {title}\n")
 
             try:
@@ -211,6 +228,8 @@ def main() -> int:
                 filename = f"{slugify(artist)}--{slugify(title)}--{key}{ext}"
                 dest = OUT / filename
                 download_media(media_url, dest)
+                size_kb = dest.stat().st_size // 1024
+                log.info("  OK %s (%d KB) — %d/%d", dest.name, size_kb, len(done) + 1, len(songs))
 
                 done[key] = {
                     "key": key,
@@ -229,7 +248,7 @@ def main() -> int:
                 )
                 time.sleep(0.4)
             except Exception as exc:
-                print(f"  sin audio: {exc}", flush=True)
+                log.warning("  FALLO: %s", exc)
                 failed[key] = {
                     "key": key, "title": title, "artist": artist, "url": recording_url,
                 }
@@ -240,7 +259,7 @@ def main() -> int:
         browser.close()
 
     ok = sum(1 for item in done.values() if Path(item["file"]).exists())
-    print(f"Listo: {ok}/{len(songs)} en {OUT}", flush=True)
+    log.info("Listo: %d/%d en %s", ok, len(songs), OUT)
     return 0 if ok else 1
 
 
