@@ -22,9 +22,24 @@ fi
 log "=== contenedor arrancado ==="
 log "repo=$GIT_REPO_URL usuario=$SMULE_USER"
 
+pull_repo() {
+  runtime="canciones/fallidas.json canciones/progreso.txt canciones/manifest.json canciones/descarga.log"
+  backup=$(mktemp -d)
+  for f in $runtime; do
+    [ -f "$REPO_DIR/$f" ] && cp "$REPO_DIR/$f" "$backup/$(basename "$f")"
+  done
+  git -C "$REPO_DIR" reset --hard HEAD
+  git -C "$REPO_DIR" pull --ff-only
+  for f in $runtime; do
+    b="$backup/$(basename "$f")"
+    [ -f "$b" ] && cp "$b" "$REPO_DIR/$f"
+  done
+  rm -rf "$backup"
+}
+
 if [ -d "$REPO_DIR/.git" ]; then
   log "actualizando repo..."
-  git -C "$REPO_DIR" pull --ff-only
+  pull_repo
 elif [ -e "$REPO_DIR" ] && [ -n "$(ls -A "$REPO_DIR" 2>/dev/null)" ]; then
   # ponytail: volumen con canciones/ pero sin .git (arranque anterior falló al clonar)
   log "repo sin .git; reclonando y conservando canciones..."
