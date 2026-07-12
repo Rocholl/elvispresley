@@ -12,7 +12,7 @@ if [ -z "${GIT_REPO_URL:-}" ]; then
 fi
 
 if [ ! -d "$REPO_DIR/.git" ]; then
-  echo "Clonando repo privado en $REPO_DIR..."
+  echo "Clonando repo en $REPO_DIR..."
   git clone --depth 1 "$GIT_REPO_URL" "$REPO_DIR"
 else
   echo "Actualizando repo..."

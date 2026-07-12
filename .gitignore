@@ -1,4 +1,5 @@
 deploy-key
+docker-compose.override.yml
 .env
 __pycache__/
 canciones/*.m4a

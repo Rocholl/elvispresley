@@ -6,9 +6,6 @@ services:
     env_file: .env
     volumes:
       - abuela-data:/data
-      - ${DEPLOY_KEY_PATH:-./deploy-key}:/run/secrets/deploy_key:ro
-    environment:
-      GIT_SSH_COMMAND: ssh -i /run/secrets/deploy_key -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes
     shm_size: "1gb"
 
 volumes:

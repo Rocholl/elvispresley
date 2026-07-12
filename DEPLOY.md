@@ -1,6 +1,6 @@
 # Despliegue en VPS Hetzner — Abuela (descarga Smule)
 
-Guía para levantar el descargador en un servidor Hetzner con Docker Compose, clonando un **repo privado** en un volumen persistente y dejando que el contenedor descargue las canciones solas.
+Guía para levantar el descargador en un servidor Hetzner con Docker Compose, clonando el repo [elvispresley](https://github.com/Rocholl/elvispresley) en un volumen persistente y dejando que el contenedor descargue las canciones solas.
 
 ---
 
@@ -11,7 +11,7 @@ Guía para levantar el descargador en un servidor Hetzner con Docker Compose, cl
 | Objetivo | Descargar ~10.000 grabaciones de Smule (`ElvaTorales1`) |
 | Runtime | Python 3 + Playwright (Chromium headless) |
 | Persistencia | Volumen Docker `abuela-data` → `/data/repo` (código + `canciones/`) |
-| Repo privado | Deploy key SSH o token HTTPS en `.env` |
+| Repo | `https://github.com/Rocholl/elvispresley` (público; HTTPS sin clave) |
 | Tiempo estimado | Días (cada canción ~30–90 s de navegador + descarga) |
 | Disco recomendado | **80–120 GB** (audio + catálogo + margen) |
 
@@ -36,54 +36,30 @@ Solo necesitas SSH. En Hetzner → Firewalls:
 
 ---
 
-## 2. Preparar acceso al repo privado (GitHub)
+## 2. Acceso al repo (elvispresley es público)
 
-### Opción A — Deploy key SSH (recomendada)
-
-En tu máquina local:
-
-```bash
-ssh-keygen -t ed25519 -f deploy-key -N "" -C "hetzner-abuela"
-```
-
-1. Copia `deploy-key.pub` en GitHub → repo **abuela** → Settings → Deploy keys → Add
-2. **Solo lectura** (no marques write)
-3. Guarda `deploy-key` (privada) para el servidor — **nunca la subas al repo**
-
-### Opción B — Token HTTPS
-
-GitHub → Settings → Developer settings → Fine-grained token:
-
-- Repo: solo `abuela`
-- Permisos: Contents → Read
-
-En `.env`:
+No hace falta deploy key. El `.env.example` ya trae:
 
 ```env
-GIT_REPO_URL=https://x-access-token:ghp_TU_TOKEN@github.com/TU_USUARIO/abuela.git
+GIT_REPO_URL=https://github.com/Rocholl/elvispresley.git
 ```
 
-Con HTTPS no hace falta montar `deploy-key`.
+### Si más adelante lo haces privado
+
+1. Genera deploy key: `ssh-keygen -t ed25519 -f deploy-key -N ""`
+2. Añádela en GitHub → **elvispresley** → Settings → Deploy keys
+3. En el servidor:
+
+```bash
+cp docker-compose.override.example.yml docker-compose.override.yml
+# edita .env: GIT_REPO_URL=git@github.com:Rocholl/elvispresley.git
+```
 
 ---
 
-## 3. Subir el proyecto al repo privado
+## 3. ~~Subir el proyecto al repo~~ (ya está en GitHub)
 
-Asegúrate de que el repo contiene al menos:
-
-```
-abuela/
-├── descargar.py
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── entrypoint.sh
-└── .env.example
-```
-
-**No subas** `canciones/*.m4a`, `cookies.txt`, `deploy-key` ni `.env`.
-
-Opcional: sube `canciones/catalogo-completo.json` si ya lo tienes — el script lo reutiliza y evita re-listar Smule.
+Repo: **https://github.com/Rocholl/elvispresley**
 
 ---
 
@@ -98,46 +74,39 @@ ssh root@TU_IP_HETZNER
 ### Instalar Docker
 
 ```bash
-apt update && apt install -y ca-certificates curl
+apt update && apt install -y ca-certificates curl git
 curl -fsSL https://get.docker.com | sh
 apt install -y docker-compose-plugin
 ```
 
-### Directorio de despliegue
+### Clonar y arrancar (todo desde el repo)
 
 ```bash
-mkdir -p /opt/abuela && cd /opt/abuela
+git clone https://github.com/Rocholl/elvispresley.git /opt/elvispresley
+cd /opt/elvispresley
+chmod +x deploy.sh
+./deploy.sh
 ```
 
-Copia desde tu máquina (solo lo necesario para construir la imagen):
+`deploy.sh` crea `.env` si no existe, construye la imagen y levanta el contenedor.
+
+### Manual (equivalente)
 
 ```bash
-scp Dockerfile docker-compose.yml entrypoint.sh requirements.txt .env.example root@TU_IP:/opt/abuela/
-scp deploy-key root@TU_IP:/opt/abuela/deploy-key
-chmod 600 /opt/abuela/deploy-key   # en el servidor
-```
-
-### Variables de entorno
-
-```bash
+git clone https://github.com/Rocholl/elvispresley.git /opt/elvispresley
+cd /opt/elvispresley
 cp .env.example .env
-nano .env
-```
-
-Ejemplo con SSH:
-
-```env
-GIT_REPO_URL=git@github.com:TU_USUARIO/abuela.git
-SMULE_USER=ElvaTorales1
-DEPLOY_KEY_PATH=./deploy-key
+docker compose up -d --build
 ```
 
 ---
 
 ## 5. Arrancar
 
+Si no usaste `./deploy.sh`:
+
 ```bash
-cd /opt/abuela
+cd /opt/elvispresley
 docker compose up -d --build
 ```
 
@@ -222,7 +191,7 @@ rsync -avz --progress root@TU_IP:/var/lib/docker/volumes/abuela_abuela-data/_dat
 2. En el servidor:
 
 ```bash
-cd /opt/abuela
+cd /opt/elvispresley
 docker compose restart abuela
 ```
 
@@ -256,21 +225,16 @@ Un CX22 (2 vCPU, 4 GB) puede ir justo con Chromium; si ves OOM, sube a CX32.
 ## Estructura de archivos en el servidor
 
 ```
-/opt/abuela/
-├── Dockerfile
+/opt/elvispresley/          # git clone en el servidor (build context)
 ├── docker-compose.yml
-├── entrypoint.sh
-├── requirements.txt
-├── .env                 # secretos (no en git)
-└── deploy-key           # clave SSH (no en git)
+├── deploy.sh
+├── .env
+└── ...
 
-/var/lib/docker/volumes/abuela_abuela-data/_data/
-└── repo/                # clone del repo privado
+/var/lib/docker/volumes/elvispresley_abuela-data/_data/
+└── repo/                   # clone dentro del volumen (código + canciones)
     ├── descargar.py
     └── canciones/
-        ├── manifest.json
-        ├── catalogo-completo.json
-        └── *.m4a / *.mp4
 ```
 
 ---
@@ -278,8 +242,6 @@ Un CX22 (2 vCPU, 4 GB) puede ir justo con Chromium; si ves OOM, sube a CX32.
 ## Checklist rápido
 
 - [ ] VPS Hetzner con ≥ 80 GB disco y 8 GB RAM
-- [ ] Repo privado con el código de despliegue
-- [ ] Deploy key o token configurado
-- [ ] `.env` en el servidor con `GIT_REPO_URL`
-- [ ] `docker compose up -d --build`
+- [ ] Repo clonado en `/opt/elvispresley`
+- [ ] `./deploy.sh` o `docker compose up -d --build`
 - [ ] `docker compose logs -f` confirma clon + descarga
