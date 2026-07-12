@@ -1,0 +1,6 @@
+deploy-key
+.env
+__pycache__/
+canciones/*.m4a
+canciones/*.mp4
+cookies.txt
