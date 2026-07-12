@@ -18,7 +18,7 @@ ACCOUNT_ID = 2448626046
 OUT = Path(__file__).resolve().parent / "canciones"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 API_LIMIT = 25
-LOAD_TIMEOUT_S = 90
+LOAD_TIMEOUT_S = int(os.environ.get("LOAD_TIMEOUT_S", "120"))
 log = logging.getLogger("descargar")
 
 
@@ -104,8 +104,11 @@ def dismiss_cookies(page) -> None:
 def try_play(page) -> None:
     for sel in (
         'button[aria-label*="Play"]',
+        'button[aria-label*="play"]',
         ".vjs-big-play-button",
         "button.vjs-play-control",
+        ".play-button",
+        '[data-testid="play-button"]',
     ):
         loc = page.locator(sel)
         if loc.count():
@@ -114,6 +117,31 @@ def try_play(page) -> None:
                 return
             except Exception:
                 pass
+    try:
+        page.locator("video").first.click(timeout=1000)
+    except Exception:
+        pass
+
+
+def _pick_media(page, captured: list[str]) -> str | None:
+    video = page.evaluate(
+        "() => document.querySelector('video')?.currentSrc"
+        " || document.querySelector('video')?.src || ''"
+    )
+    if video and MEDIA_RE.search(video):
+        return video
+    for url in captured:
+        if MEDIA_RE.search(url):
+            return url
+    m = MEDIA_RE.search(page.content())
+    if m:
+        return m.group(0)
+    store_mu = page.evaluate(
+        "() => window.DataStore?.Pages?.Recording?.performance?.media_url || ''"
+    )
+    if isinstance(store_mu, str) and MEDIA_RE.search(store_mu):
+        return store_mu
+    return None
 
 
 def media_from_page(page, recording_url: str, timeout_s: int = LOAD_TIMEOUT_S) -> str | None:
@@ -124,41 +152,38 @@ def media_from_page(page, recording_url: str, timeout_s: int = LOAD_TIMEOUT_S) -
             captured.append(response.url)
 
     page.on("response", on_response)
-    page.goto(recording_url, wait_until="domcontentloaded", timeout=60000)
-    dismiss_cookies(page)
+    try:
+        page.goto(recording_url, wait_until="load", timeout=90000)
+        dismiss_cookies(page)
+        page.wait_for_timeout(3000)
 
-    deadline = time.time() + timeout_s
-    play_attempts = 0
-    while time.time() < deadline:
-        video = page.evaluate(
-            "() => document.querySelector('video')?.currentSrc"
-            " || document.querySelector('video')?.src || ''"
-        )
-        if video and MEDIA_RE.search(video):
-            return video
+        deadline = time.time() + timeout_s
+        play_attempts = 0
+        reloaded = False
+        while time.time() < deadline:
+            found = _pick_media(page, captured)
+            if found:
+                return found
 
-        for url in captured:
-            if MEDIA_RE.search(url):
-                return url
+            elapsed = timeout_s - (deadline - time.time())
+            if not reloaded and elapsed > timeout_s * 0.5:
+                log.info("  recargando página...")
+                page.reload(wait_until="load", timeout=90000)
+                dismiss_cookies(page)
+                try_play(page)
+                reloaded = True
+                page.wait_for_timeout(3000)
+                continue
 
-        m = MEDIA_RE.search(page.content())
-        if m:
-            return m.group(0)
+            if play_attempts < 8 and elapsed > 3 * (play_attempts + 1):
+                try_play(page)
+                play_attempts += 1
 
-        store_mu = page.evaluate(
-            "() => window.DataStore?.Pages?.Recording?.performance?.media_url || null"
-        )
-        elapsed = timeout_s - (deadline - time.time())
-        if elapsed > 30 and not store_mu and not captured and not video:
-            return None
+            page.wait_for_timeout(1500)
 
-        if play_attempts < 4 and elapsed > 4 * (play_attempts + 1):
-            try_play(page)
-            play_attempts += 1
-
-        page.wait_for_timeout(1000)
-
-    return None
+        return None
+    finally:
+        page.remove_listener("response", on_response)
 
 
 def download_media(url: str, dest: Path) -> None:
@@ -194,11 +219,19 @@ def main() -> int:
 
     with sync_playwright() as p:
         # ponytail: PLAYWRIGHT_CHANNEL=chrome en macOS; sin canal usa Chromium del contenedor
-        launch = {"headless": True}
+        launch = {
+            "headless": True,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        }
         if ch := os.environ.get("PLAYWRIGHT_CHANNEL"):
             launch["channel"] = ch
         browser = p.chromium.launch(**launch)
         page = browser.new_page(user_agent=UA)
+        page.set_viewport_size({"width": 1280, "height": 720})
 
         log.info("Obteniendo catálogo de %s...", username)
         songs = fetch_channel_songs(page, ACCOUNT_ID, username)
@@ -220,7 +253,14 @@ def main() -> int:
             progress.write_text(f"{i}/{len(songs)} - {title}\n")
 
             try:
-                media_url = media_from_page(page, recording_url)
+                media_url = None
+                for attempt in range(1, 3):
+                    media_url = media_from_page(page, recording_url)
+                    if media_url:
+                        break
+                    if attempt < 2:
+                        log.info("  reintento %d/2...", attempt + 1)
+                        page.wait_for_timeout(2000)
                 if not media_url:
                     raise RuntimeError("audio no cargó a tiempo")
 
