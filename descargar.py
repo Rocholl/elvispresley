@@ -90,6 +90,51 @@ def fetch_channel_songs(page, account_id: int, username: str) -> list[dict]:
 MEDIA_RE = re.compile(r"https://c-cf\.cdn\.smule\.com/.+?\.(?:m4a|mp4)")
 
 
+def resolve_file(item: dict) -> Path:
+    """Path local; el manifest puede traer rutas absolutas de otro equipo."""
+    name = Path(item.get("file") or "").name
+    return OUT / name if name else OUT / f"{item.get('key', 'sin-key')}.m4a"
+
+
+def file_ok(path: Path) -> bool:
+    return path.exists() and path.stat().st_size >= 1024
+
+
+def media_from_fetch(page, performance_key: str) -> str | None:
+    found = page.evaluate(
+        """async (key) => {
+          const cdn = /https:\\/\\/c-cf\\.cdn\\.smule\\.com\\/[^"'\\s]+\\.(m4a|mp4)/;
+          const pick = (obj) => {
+            if (!obj) return null;
+            for (const k of ['video_media_mp4_url', 'media_url', 'video_media_url']) {
+              const v = obj[k];
+              if (typeof v === 'string' && cdn.test(v)) return v.match(cdn)[0];
+            }
+            return null;
+          };
+          const urls = [
+            `https://www.smule.com/api/recording/${key}`,
+            `https://www.smule.com/api/performance/${key}`,
+          ];
+          for (const u of urls) {
+            try {
+              const r = await fetch(u, {headers: {Accept: 'application/json'}});
+              const text = await r.text();
+              const m = text.match(cdn);
+              if (m) return m[0];
+              try {
+                const j = JSON.parse(text);
+                return pick(j.performance || j.recording || j.list?.[0] || j);
+              } catch {}
+            } catch {}
+          }
+          return null;
+        }""",
+        performance_key,
+    )
+    return found if found and MEDIA_RE.search(found) else None
+
+
 def dismiss_cookies(page) -> None:
     for sel in ('button:has-text("Accept Cookies")', 'button:has-text("Aceptar")'):
         btn = page.locator(sel)
@@ -137,14 +182,27 @@ def _pick_media(page, captured: list[str]) -> str | None:
     if m:
         return m.group(0)
     store_mu = page.evaluate(
-        "() => window.DataStore?.Pages?.Recording?.performance?.media_url || ''"
+        """() => {
+          const p = window.DataStore?.Pages?.Recording?.performance;
+          if (!p) return '';
+          for (const k of ['video_media_mp4_url', 'media_url', 'video_media_url']) {
+            const v = p[k];
+            if (typeof v === 'string' && v.includes('cdn.smule.com')) return v;
+          }
+          return '';
+        }"""
     )
     if isinstance(store_mu, str) and MEDIA_RE.search(store_mu):
         return store_mu
     return None
 
 
-def media_from_page(page, recording_url: str, timeout_s: int = LOAD_TIMEOUT_S) -> str | None:
+def media_from_page(page, recording_url: str, performance_key: str, timeout_s: int = LOAD_TIMEOUT_S) -> str | None:
+    found = media_from_fetch(page, performance_key)
+    if found:
+        log.info("  audio vía API")
+        return found
+
     captured: list[str] = []
 
     def on_response(response):
@@ -153,9 +211,20 @@ def media_from_page(page, recording_url: str, timeout_s: int = LOAD_TIMEOUT_S) -
 
     page.on("response", on_response)
     try:
-        page.goto(recording_url, wait_until="load", timeout=90000)
+        page.goto(recording_url, wait_until="domcontentloaded", timeout=60000)
         dismiss_cookies(page)
-        page.wait_for_timeout(3000)
+        found = _pick_media(page, captured)
+        if found:
+            log.info("  audio en HTML inicial")
+            return found
+
+        try:
+            page.wait_for_load_state("load", timeout=30000)
+        except Exception:
+            pass
+        found = _pick_media(page, captured)
+        if found:
+            return found
 
         deadline = time.time() + timeout_s
         play_attempts = 0
@@ -168,7 +237,7 @@ def media_from_page(page, recording_url: str, timeout_s: int = LOAD_TIMEOUT_S) -
             elapsed = timeout_s - (deadline - time.time())
             if not reloaded and elapsed > timeout_s * 0.5:
                 log.info("  recargando página...")
-                page.reload(wait_until="load", timeout=90000)
+                page.reload(wait_until="domcontentloaded", timeout=60000)
                 dismiss_cookies(page)
                 try_play(page)
                 reloaded = True
@@ -218,9 +287,10 @@ def main() -> int:
         failed = {f["key"]: f for f in json.loads(failures.read_text())}
 
     with sync_playwright() as p:
-        # ponytail: PLAYWRIGHT_CHANNEL=chrome en macOS; sin canal usa Chromium del contenedor
+        # ponytail: HEADLESS=false + xvfb en Docker evita bloqueos de Smule al headless
+        headless = os.environ.get("HEADLESS", "true").lower() not in ("0", "false", "no")
         launch = {
-            "headless": True,
+            "headless": headless,
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
@@ -235,7 +305,8 @@ def main() -> int:
 
         log.info("Obteniendo catálogo de %s...", username)
         songs = fetch_channel_songs(page, ACCOUNT_ID, username)
-        log.info("Total: %d canciones (%d ya descargadas)", len(songs), len(done))
+        already = sum(1 for item in done.values() if file_ok(resolve_file(item)))
+        log.info("Total: %d canciones (%d ya descargadas)", len(songs), already)
 
         for i, song in enumerate(songs, 1):
             key = song["performance_key"]
@@ -244,9 +315,9 @@ def main() -> int:
             web_url = song.get("web_url") or ""
             recording_url = f"https://www.smule.com{web_url}"
 
-            if key in done and Path(done[key]["file"]).exists():
+            if key in done and file_ok(resolve_file(done[key])):
                 if i % 100 == 0:
-                    log.info("[%d/%d] %d descargadas (saltando ya hechas)", i, len(songs), len(done))
+                    log.info("[%d/%d] %d descargadas (saltando ya hechas)", i, len(songs), already)
                 continue
 
             log.info("[%d/%d] %s - %s", i, len(songs), artist, title)
@@ -254,20 +325,32 @@ def main() -> int:
 
             try:
                 media_url = None
-                for attempt in range(1, 3):
-                    media_url = media_from_page(page, recording_url)
-                    if media_url:
-                        break
-                    if attempt < 2:
-                        log.info("  reintento %d/2...", attempt + 1)
-                        page.wait_for_timeout(2000)
+                dest = None
+                prev = done.get(key)
+
+                # Reutilizar URL del manifest (las rutas de Mac no existen en el VPS)
+                if prev and (mu := prev.get("media_url")) and MEDIA_RE.search(mu):
+                    dest = resolve_file(prev)
+                    if not file_ok(dest):
+                        log.info("  redescargando desde manifest...")
+                        download_media(mu, dest)
+                    media_url = mu
+
+                if not media_url:
+                    for attempt in range(1, 3):
+                        media_url = media_from_page(page, recording_url, key)
+                        if media_url:
+                            break
+                        if attempt < 2:
+                            log.info("  reintento %d/2...", attempt + 1)
+                            page.wait_for_timeout(2000)
                 if not media_url:
                     raise RuntimeError("audio no cargó a tiempo")
 
-                ext = ".mp4" if media_url.endswith(".mp4") else ".m4a"
-                filename = f"{slugify(artist)}--{slugify(title)}--{key}{ext}"
-                dest = OUT / filename
-                download_media(media_url, dest)
+                if not dest:
+                    ext = ".mp4" if media_url.endswith(".mp4") else ".m4a"
+                    dest = OUT / f"{slugify(artist)}--{slugify(title)}--{key}{ext}"
+                    download_media(media_url, dest)
                 size_kb = dest.stat().st_size // 1024
                 log.info("  OK %s (%d KB) — %d/%d", dest.name, size_kb, len(done) + 1, len(songs))
 
@@ -277,7 +360,7 @@ def main() -> int:
                     "artist": artist,
                     "recording_url": recording_url,
                     "media_url": media_url,
-                    "file": str(dest),
+                    "file": dest.name,
                 }
                 manifest.write_text(
                     json.dumps(list(done.values()), ensure_ascii=False, indent=2)
@@ -298,7 +381,7 @@ def main() -> int:
 
         browser.close()
 
-    ok = sum(1 for item in done.values() if Path(item["file"]).exists())
+    ok = sum(1 for item in done.values() if file_ok(resolve_file(item)))
     log.info("Listo: %d/%d en %s", ok, len(songs), OUT)
     return 0 if ok else 1
 

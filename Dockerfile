@@ -1,6 +1,6 @@
 FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
-RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client \
+RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /data

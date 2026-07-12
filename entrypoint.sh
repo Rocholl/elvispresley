@@ -44,5 +44,6 @@ fi
 mkdir -p "$REPO_DIR/canciones"
 LOG="$REPO_DIR/canciones/descarga.log"
 cd "$REPO_DIR"
-log "iniciando descargar.py @$SMULE_USER"
-exec python3 descargar.py "$SMULE_USER"
+log "iniciando descargar.py @$SMULE_USER (xvfb)"
+export HEADLESS=false
+exec xvfb-run -a --server-args="-screen 0 1280x720x24" python3 descargar.py "$SMULE_USER"
